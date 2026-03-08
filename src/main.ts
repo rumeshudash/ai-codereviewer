@@ -5,7 +5,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, Output } from "ai";
 import { Octokit } from "@octokit/rest";
 import minimatch from "minimatch";
-import parseDiff, { Chunk, File } from "parse-diff";
+import parseDiff, { File } from "parse-diff";
 import { z } from "zod";
 
 const GITHUB_TOKEN: string = core.getInput("GITHUB_TOKEN");
@@ -102,7 +102,9 @@ async function analyzeCode(
   prDetails: PRDetails
 ): Promise<ReviewCommentInput[]> {
   const prompt = createPromptForAllDiffs(parsedDiff, prDetails);
+  console.log("Prompt:", prompt);
   const aiResponse = await getAIResponse(prompt);
+  console.log("AI Response:", aiResponse);
   if (!aiResponse || aiResponse.length === 0) return [];
   const comments = createCommentsFromResponse(aiResponse);
   return comments.filter((c) => c.body.length > 0);
@@ -132,7 +134,7 @@ function createPromptForAllDiffs(
 
 CRITICAL - When to output comments:
 - If the code has no bugs, security issues, style problems, or clear improvements to suggest, you MUST return exactly: {"reviews": []}
-- Do NOT add comments just to say something. No compliments, no "consider X" unless there is a real issue. Empty "reviews" is the correct response for good or acceptable code.
+- Only provide a review if there is a concrete, fixable problem or a clear improvement. If in doubt, return an empty review array.
 - Only add a review when there is a concrete, fixable problem or a clear improvement (e.g. bug, security, wrong logic, missing error handling, misleading name). If in doubt, return empty reviews.
 
 Output format (use this exact JSON shape):
@@ -142,7 +144,7 @@ Output format (use this exact JSON shape):
 Rules:
 - "path" MUST match the file path from the diff exactly (e.g. "src/main.ts").
 - Use lineNumber for the line to comment on (or last line of a range). Use endLineNumber only for a multi-line range; omit for single-line.
-- Do not suggest adding code comments or documentation unless they fix a real clarity problem.
+- Avoid suggestions for refactoring unless they address a significant performance, security, or maintainability issue.
 - Write comments in GitHub Markdown format.
 
 Pull request title: ${prDetails.title}
