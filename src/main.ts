@@ -101,9 +101,7 @@ async function analyzeCode(
   prDetails: PRDetails
 ): Promise<ReviewCommentInput[]> {
   const prompt = createPromptForAllDiffs(parsedDiff, prDetails);
-  console.log("Prompt:", prompt);
   const aiResponse = await getAIResponse(prompt);
-  console.log("AI Response:", aiResponse);
   if (!aiResponse || aiResponse.length === 0) return [];
   const comments = createCommentsFromResponse(aiResponse);
   return comments.filter((c) => c.body.length > 0);
