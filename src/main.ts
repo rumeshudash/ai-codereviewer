@@ -35,12 +35,15 @@ const model = openaiProvider
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
 const reviewOutputSchema = z.object({
-  reviews: z.array(
-    z.object({
-      lineNumber: z.union([z.string(), z.number()]),
-      reviewComment: z.string(),
-    })
-  ).optional(),
+  reviews: z
+    .array(
+      z.object({
+        lineNumber: z.union([z.string(), z.number()]),
+        endLineNumber: z.union([z.string(), z.number()]).optional(),
+        reviewComment: z.string(),
+      })
+    )
+    .optional(),
 });
 
 interface PRDetails {
@@ -84,11 +87,20 @@ async function getDiff(
   return response.data;
 }
 
+type ReviewCommentInput = {
+  body: string;
+  path: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+  start_line?: number;
+  start_side?: "LEFT" | "RIGHT";
+};
+
 async function analyzeCode(
   parsedDiff: File[],
   prDetails: PRDetails
-): Promise<Array<{ body: string; path: string; line: number }>> {
-  const comments: Array<{ body: string; path: string; line: number }> = [];
+): Promise<ReviewCommentInput[]> {
+  const comments: ReviewCommentInput[] = [];
 
   for (const file of parsedDiff) {
     if (file.to === "/dev/null") continue; // Ignore deleted files
@@ -110,6 +122,8 @@ async function analyzeCode(
 
 function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
   return `Your task is to review pull requests. Instructions:
+- Provide the response in following JSON format: {"reviews": [{"lineNumber": <line>, "endLineNumber": <optional_end_line>, "reviewComment": "<comment>"}]}
+- Use lineNumber for the primary line to comment on (or the last line of a range). Use endLineNumber only when the comment applies to a contiguous range of lines (first line of range); omit it for single-line comments.
 - Do not give positive comments or compliments.
 - Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
 - Write the comment in GitHub Markdown format.
@@ -141,6 +155,7 @@ ${chunk.changes
 
 async function getAIResponse(prompt: string): Promise<Array<{
   lineNumber: string;
+  endLineNumber?: string;
   reviewComment: string;
 }> | null> {
   try {
@@ -157,11 +172,13 @@ async function getAIResponse(prompt: string): Promise<Array<{
       }),
     });
 
-    const reviews = output.reviews?.map((r) => ({
-      lineNumber: String(r.lineNumber),
-      reviewComment: r.reviewComment,
-    }));
-    return reviews ?? null;
+    const reviews =
+      output.reviews?.map((r) => ({
+        lineNumber: String(r.lineNumber),
+        endLineNumber: r.endLineNumber != null ? String(r.endLineNumber) : undefined,
+        reviewComment: r.reviewComment,
+      })) ?? null;
+    return reviews;
   } catch (error) {
     console.error("Error:", error);
     return null;
@@ -173,18 +190,39 @@ function createComment(
   chunk: Chunk,
   aiResponses: Array<{
     lineNumber: string;
+    endLineNumber?: string;
     reviewComment: string;
   }>
-): Array<{ body: string; path: string; line: number }> {
+): ReviewCommentInput[] {
   return aiResponses.flatMap((aiResponse) => {
     if (!file.to) {
       return [];
     }
-    return {
+    const line = Number(aiResponse.lineNumber);
+    const endLine =
+      aiResponse.endLineNumber != null
+        ? Number(aiResponse.endLineNumber)
+        : undefined;
+    const isMultiLine =
+      endLine != null && endLine !== line;
+    const [startLine, lastLine] =
+      isMultiLine && endLine != null
+        ? endLine < line
+          ? [endLine, line]
+          : [line, endLine]
+        : [line, line];
+
+    const comment: ReviewCommentInput = {
       body: aiResponse.reviewComment,
       path: file.to,
-      line: Number(aiResponse.lineNumber),
+      line: lastLine,
+      side: "RIGHT",
     };
+    if (isMultiLine) {
+      comment.start_line = startLine;
+      comment.start_side = "RIGHT";
+    }
+    return comment;
   });
 }
 
@@ -192,7 +230,7 @@ async function createReviewComment(
   owner: string,
   repo: string,
   pull_number: number,
-  comments: Array<{ body: string; path: string; line: number }>
+  comments: ReviewCommentInput[]
 ): Promise<void> {
   await octokit.pulls.createReview({
     owner,
