@@ -40,7 +40,7 @@ const reviewOutputSchema = z.object({
       lineNumber: z.union([z.string(), z.number()]),
       reviewComment: z.string(),
     })
-  ),
+  ).optional(),
 });
 
 interface PRDetails {
@@ -157,11 +157,11 @@ async function getAIResponse(prompt: string): Promise<Array<{
       }),
     });
 
-    const reviews = output.reviews.map((r) => ({
+    const reviews = output.reviews?.map((r) => ({
       lineNumber: String(r.lineNumber),
       reviewComment: r.reviewComment,
     }));
-    return reviews;
+    return reviews ?? null;
   } catch (error) {
     console.error("Error:", error);
     return null;
