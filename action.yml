@@ -17,7 +17,7 @@ inputs:
   GEMINI_MODEL:
     description: "Gemini model name (used when GEMINI_API_KEY is set)."
     required: false
-    default: "gemini-2.0-flash"
+    default: "gemini-2.5-flash"
   exclude:
     description: "Glob patterns to exclude files from the diff analysis"
     required: false
