@@ -1,18 +1,46 @@
 import { readFileSync } from "fs";
 import * as core from "@actions/core";
-import OpenAI from "openai";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenAI } from "@ai-sdk/openai";
+import { generateText, Output } from "ai";
 import { Octokit } from "@octokit/rest";
-import parseDiff, { Chunk, File } from "parse-diff";
 import minimatch from "minimatch";
+import parseDiff, { Chunk, File } from "parse-diff";
+import { z } from "zod";
 
 const GITHUB_TOKEN: string = core.getInput("GITHUB_TOKEN");
 const OPENAI_API_KEY: string = core.getInput("OPENAI_API_KEY");
 const OPENAI_API_MODEL: string = core.getInput("OPENAI_API_MODEL");
+const GEMINI_API_KEY: string = core.getInput("GEMINI_API_KEY");
+const GEMINI_MODEL: string = core.getInput("GEMINI_MODEL");
+
+const openaiProvider = OPENAI_API_KEY
+  ? createOpenAI({ apiKey: OPENAI_API_KEY })
+  : null;
+const googleProvider = GEMINI_API_KEY
+  ? createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY })
+  : null;
+
+const model = openaiProvider
+  ? openaiProvider(OPENAI_API_MODEL)
+  : googleProvider
+  ? googleProvider(GEMINI_MODEL)
+  : (() => {
+      core.setFailed(
+        "Either OPENAI_API_KEY or GEMINI_API_KEY must be set. Provide one to run the code review."
+      );
+      process.exit(1);
+    })();
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
+const reviewOutputSchema = z.object({
+  reviews: z.array(
+    z.object({
+      lineNumber: z.union([z.string(), z.number()]),
+      reviewComment: z.string(),
+    })
+  ),
 });
 
 interface PRDetails {
@@ -114,32 +142,25 @@ async function getAIResponse(prompt: string): Promise<Array<{
   lineNumber: string;
   reviewComment: string;
 }> | null> {
-  const queryConfig = {
-    model: OPENAI_API_MODEL,
-    temperature: 0.2,
-    max_tokens: 700,
-    top_p: 1,
-    frequency_penalty: 0,
-    presence_penalty: 0,
-  };
-
   try {
-    const response = await openai.chat.completions.create({
-      ...queryConfig,
-      // return JSON if the model supports it:
-      ...(OPENAI_API_MODEL === "gpt-4-1106-preview"
-        ? { response_format: { type: "json_object" } }
-        : {}),
-      messages: [
-        {
-          role: "system",
-          content: prompt,
-        },
-      ],
+    const { output } = await generateText({
+      model,
+      system: prompt,
+      prompt: "",
+      maxOutputTokens: 700,
+      temperature: 0.2,
+      output: Output.object({
+        schema: reviewOutputSchema,
+        name: "CodeReview",
+        description: "Code review comments for a diff chunk",
+      }),
     });
 
-    const res = response.choices[0].message?.content?.trim() || "{}";
-    return JSON.parse(res).reviews;
+    const reviews = output.reviews.map((r) => ({
+      lineNumber: String(r.lineNumber),
+      reviewComment: r.reviewComment,
+    }));
+    return reviews;
   } catch (error) {
     console.error("Error:", error);
     return null;
