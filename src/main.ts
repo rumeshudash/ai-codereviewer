@@ -160,8 +160,8 @@ async function getAIResponse(prompt: string): Promise<Array<{
     const reviews = output.reviews?.map((r) => ({
       lineNumber: String(r.lineNumber),
       reviewComment: r.reviewComment,
-    }));
-    return reviews ?? null;
+    })) ?? null;
+    return reviews;
   } catch (error) {
     console.error("Error:", error);
     return null;
