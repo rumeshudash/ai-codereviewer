@@ -104,7 +104,8 @@ async function analyzeCode(
   const prompt = createPromptForAllDiffs(parsedDiff, prDetails);
   const aiResponse = await getAIResponse(prompt);
   if (!aiResponse || aiResponse.length === 0) return [];
-  return createCommentsFromResponse(aiResponse);
+  const comments = createCommentsFromResponse(aiResponse);
+  return comments.filter((c) => c.body.length > 0);
 }
 
 function createPromptForAllDiffs(
@@ -127,14 +128,22 @@ function createPromptForAllDiffs(
     })
     .join("\n\n");
 
-  return `Your task is to review a pull request. You will be given the full diff for multiple files. Instructions:
-- Provide the response in the following JSON format: {"reviews": [{"path": "<file path>", "lineNumber": <line>, "endLineNumber": <optional_end_line>, "reviewComment": "<comment>"}]}
-- For each review, "path" MUST be the exact file path as shown in the diff (e.g. "src/main.ts"). Use lineNumber for the primary line to comment on (or the last line of a range). Use endLineNumber only when the comment applies to a contiguous range of lines (first line of range); omit it for single-line comments.
-- Do not give positive comments or compliments.
-- Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
-- Write each comment in GitHub Markdown format.
-- Use the PR title and description only for overall context; comment only on the code.
-- IMPORTANT: NEVER suggest adding comments to the code.
+  return `You are a strict code reviewer. Review the pull request diff and output ONLY actionable issues. Instructions:
+
+CRITICAL - When to output comments:
+- If the code has no bugs, security issues, style problems, or clear improvements to suggest, you MUST return exactly: {"reviews": []}
+- Do NOT add comments just to say something. No compliments, no "consider X" unless there is a real issue. Empty "reviews" is the correct response for good or acceptable code.
+- Only add a review when there is a concrete, fixable problem or a clear improvement (e.g. bug, security, wrong logic, missing error handling, misleading name). If in doubt, return empty reviews.
+
+Output format (use this exact JSON shape):
+- When there are issues: {"reviews": [{"path": "<exact file path from diff>", "lineNumber": <line>, "endLineNumber": <optional>, "reviewComment": "<markdown comment>"}]}
+- When there are no issues: {"reviews": []}
+
+Rules:
+- "path" MUST match the file path from the diff exactly (e.g. "src/main.ts").
+- Use lineNumber for the line to comment on (or last line of a range). Use endLineNumber only for a multi-line range; omit for single-line.
+- Do not suggest adding code comments or documentation unless they fix a real clarity problem.
+- Write comments in GitHub Markdown format.
 
 Pull request title: ${prDetails.title}
 Pull request description:
@@ -167,18 +176,19 @@ async function getAIResponse(prompt: string): Promise<AIReviewItem[] | null> {
       output: Output.object({
         schema: reviewOutputSchema,
         name: "CodeReview",
-        description: "Code review comments for the full diff",
+        description:
+          "List of code review comments. Must be an empty array when there are no issues to report.",
       }),
     });
 
-    const reviews =
-      output.reviews?.map((r) => ({
-        path: r.path,
-        lineNumber: String(r.lineNumber),
-        endLineNumber:
-          r.endLineNumber != null ? String(r.endLineNumber) : undefined,
-        reviewComment: r.reviewComment,
-      })) ?? null;
+    const raw = output.reviews ?? [];
+    const reviews = raw.map((r) => ({
+      path: r.path,
+      lineNumber: String(r.lineNumber),
+      endLineNumber:
+        r.endLineNumber != null ? String(r.endLineNumber) : undefined,
+      reviewComment: (r.reviewComment || "").trim(),
+    }));
     return reviews;
   } catch (error) {
     console.error("Error:", error);
