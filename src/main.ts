@@ -43,8 +43,7 @@ const reviewOutputSchema = z.object({
         endLineNumber: z.union([z.string(), z.number()]).optional(),
         reviewComment: z.string(),
       })
-    )
-    .optional(),
+    ),
 });
 
 interface PRDetails {
