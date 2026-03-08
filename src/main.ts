@@ -38,6 +38,7 @@ const reviewOutputSchema = z.object({
   reviews: z
     .array(
       z.object({
+        path: z.string(),
         lineNumber: z.union([z.string(), z.number()]),
         endLineNumber: z.union([z.string(), z.number()]).optional(),
         reviewComment: z.string(),
@@ -100,40 +101,41 @@ async function analyzeCode(
   parsedDiff: File[],
   prDetails: PRDetails
 ): Promise<ReviewCommentInput[]> {
-  const comments: ReviewCommentInput[] = [];
-
-  for (const file of parsedDiff) {
-    if (file.to === "/dev/null") continue; // Ignore deleted files
-    for (const chunk of file.chunks) {
-      const prompt = createPrompt(file, chunk, prDetails);
-      console.log("Prompt:", prompt);
-      const aiResponse = await getAIResponse(prompt);
-      console.log("AI Response:", aiResponse);
-      if (aiResponse) {
-        const newComments = createComment(file, aiResponse);
-        if (newComments) {
-          comments.push(...newComments);
-        }
-      }
-    }
-  }
-  return comments;
+  const prompt = createPromptForAllDiffs(parsedDiff, prDetails);
+  const aiResponse = await getAIResponse(prompt);
+  if (!aiResponse || aiResponse.length === 0) return [];
+  return createCommentsFromResponse(aiResponse);
 }
 
-function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
-  return `Your task is to review pull requests. Instructions:
-- Provide the response in following JSON format: {"reviews": [{"lineNumber": <line>, "endLineNumber": <optional_end_line>, "reviewComment": "<comment>"}]}
-- Use lineNumber for the primary line to comment on (or the last line of a range). Use endLineNumber only when the comment applies to a contiguous range of lines (first line of range); omit it for single-line comments.
+function createPromptForAllDiffs(
+  parsedDiff: File[],
+  prDetails: PRDetails
+): string {
+  const diffSections = parsedDiff
+    .filter((file) => file.to !== "/dev/null")
+    .map((file) => {
+      const chunksText = file.chunks
+        .map(
+          (chunk) =>
+            `${chunk.content}\n${chunk.changes
+              // @ts-expect-error - ln and ln2 exist where needed
+              .map((c) => `${c.ln ? c.ln : c.ln2} ${c.content}`)
+              .join("\n")}`
+        )
+        .join("\n");
+      return `## File: ${file.to}\n\`\`\`diff\n${chunksText}\n\`\`\``;
+    })
+    .join("\n\n");
+
+  return `Your task is to review a pull request. You will be given the full diff for multiple files. Instructions:
+- Provide the response in the following JSON format: {"reviews": [{"path": "<file path>", "lineNumber": <line>, "endLineNumber": <optional_end_line>, "reviewComment": "<comment>"}]}
+- For each review, "path" MUST be the exact file path as shown in the diff (e.g. "src/main.ts"). Use lineNumber for the primary line to comment on (or the last line of a range). Use endLineNumber only when the comment applies to a contiguous range of lines (first line of range); omit it for single-line comments.
 - Do not give positive comments or compliments.
 - Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
-- Write the comment in GitHub Markdown format.
-- Use the given description only for the overall context and only comment the code.
+- Write each comment in GitHub Markdown format.
+- Use the PR title and description only for overall context; comment only on the code.
 - IMPORTANT: NEVER suggest adding comments to the code.
 
-Review the following code diff in the file "${
-    file.to
-  }" and take the pull request title and description into account when writing the response.
-  
 Pull request title: ${prDetails.title}
 Pull request description:
 
@@ -141,41 +143,40 @@ Pull request description:
 ${prDetails.description}
 ---
 
-Git diff to review:
+Full diff to review (multiple files):
 
-\`\`\`diff
-${chunk.content}
-${chunk.changes
-  // @ts-expect-error - ln and ln2 exists where needed
-  .map((c) => `${c.ln ? c.ln : c.ln2} ${c.content}`)
-  .join("\n")}
-\`\`\`
+${diffSections}
 `;
 }
 
-async function getAIResponse(prompt: string): Promise<Array<{
+type AIReviewItem = {
+  path: string;
   lineNumber: string;
   endLineNumber?: string;
   reviewComment: string;
-}> | null> {
+};
+
+async function getAIResponse(prompt: string): Promise<AIReviewItem[] | null> {
   try {
     const { output } = await generateText({
       model,
       system: prompt,
       prompt: "",
-      maxOutputTokens: 700,
+      maxOutputTokens: 4000,
       temperature: 0.2,
       output: Output.object({
         schema: reviewOutputSchema,
         name: "CodeReview",
-        description: "Code review comments for a diff chunk",
+        description: "Code review comments for the full diff",
       }),
     });
 
     const reviews =
       output.reviews?.map((r) => ({
+        path: r.path,
         lineNumber: String(r.lineNumber),
-        endLineNumber: r.endLineNumber != null ? String(r.endLineNumber) : undefined,
+        endLineNumber:
+          r.endLineNumber != null ? String(r.endLineNumber) : undefined,
         reviewComment: r.reviewComment,
       })) ?? null;
     return reviews;
@@ -185,25 +186,16 @@ async function getAIResponse(prompt: string): Promise<Array<{
   }
 }
 
-function createComment(
-  file: File,
-  aiResponses: Array<{
-    lineNumber: string;
-    endLineNumber?: string;
-    reviewComment: string;
-  }>
+function createCommentsFromResponse(
+  aiResponses: AIReviewItem[]
 ): ReviewCommentInput[] {
   return aiResponses.flatMap((aiResponse) => {
-    if (!file.to) {
-      return [];
-    }
     const line = Number(aiResponse.lineNumber);
     const endLine =
       aiResponse.endLineNumber != null
         ? Number(aiResponse.endLineNumber)
         : undefined;
-    const isMultiLine =
-      endLine != null && endLine !== line;
+    const isMultiLine = endLine != null && endLine !== line;
     const [startLine, lastLine] =
       isMultiLine && endLine != null
         ? endLine < line
@@ -213,7 +205,7 @@ function createComment(
 
     const comment: ReviewCommentInput = {
       body: aiResponse.reviewComment,
-      path: file.to,
+      path: aiResponse.path,
       line: lastLine,
       side: "RIGHT",
     };
